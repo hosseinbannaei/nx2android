@@ -519,12 +519,16 @@ class Port:
         capture_needed = self.glslc_why and self.glslc_todo()[1]
         why = self.oodle_why or ('' if ue_cached else self.ue_why) or (self.glslc_why if capture_needed else '')
         if why:
-            if not self.tools.get('adb'):   # adb is optional for a port that does not install (toolchain.require): this one needs it
-                raise BuildError(f"{self.app_name}'s shaders need preparation ({why}): the port runs the game's own code on the Android "
-                                 f'device, so it needs adb and the device even without installing. {NO_ADB}; then connect the device (USB debugging on) and port again')
-            try: Adb(self.tools['adb'], self.o.device or self.cfg.get('device'), log=say).pick()
-            except (AdbError, KeyError) as e: raise BuildError(f"{self.app_name}'s shaders need preparation ({why}): the port runs the game's own code on "
-                                                               f'the Android device, so connect it (adb) and port again ({e})') from e
+            try:
+                if not self.tools.get('adb'): raise AdbError('no adb')
+                Adb(self.tools['adb'], self.o.device or self.cfg.get('device'), log=say).pick()
+            except (AdbError, KeyError) as e:
+                if self.glslc_why and capture_needed and not (self.oodle_why or self.ue_why):
+                    say(f'[YELLOW] warning: no Android device connected for runtime GLSLC capture ({e}); proceeding with offline compilation and packaging')
+                    self.glslc_why = ''
+                else:
+                    raise BuildError(f"{self.app_name}'s shaders need preparation ({why}): the port runs the game's own code on "
+                                     f'the Android device, so connect it (adb) and port again ({e})') from e
 
         for k in ('ue_legacy',) + (() if self.ue_why else ('ue_decode',)) + (() if self.oodle_why else ('oodle_packs',)):
             if src[k][0]: raise BuildError(f'{self.app_name} needs a step that boots the game in the Mac host ({src[k][1]}), which the Android port cannot run yet')
@@ -844,9 +848,17 @@ class Port:
         try:
             if getattr(self, 'glslc_why', ''): self.device_glslc()
             if getattr(self, "ue_why", ""): self.device_ue()   # Unreal's shader code archives, decoded on the device into <version dir>/ue_shaders before the split reads them
-            nsp.split_shaders(PY, NXNATIVE, [self.dirs[v] / 'RomFS' for v in sv], [self.dirs[v] / 'ExeFS/main' for v in sv], pkg, self.env, self.logs, self.g, bool(self.derived or self.provisional),
-                               oodle=self.device_oodle if self.oodle_why else None,   # Oodle-compressed archives: the game's own decoder on the device
-                               aoc=self.aoc)   # DLC with shaders of its own (Xenoblade Chronicles 3's archives)
+            try:
+                nsp.split_shaders(PY, NXNATIVE, [self.dirs[v] / 'RomFS' for v in sv], [self.dirs[v] / 'ExeFS/main' for v in sv], pkg, self.env, self.logs, self.g, bool(self.derived or self.provisional),
+                                   oodle=self.device_oodle if self.oodle_why else None,   # Oodle-compressed archives: the game's own decoder on the device
+                                   aoc=self.aoc)   # DLC with shaders of its own (Xenoblade Chronicles 3's archives)
+            except BuildError as e:
+                if 'found no shaders' in str(e):
+                    say(f'[YELLOW] {e}: continuing without precompiled shaders (runtime shaders compiled via GLSLC)')
+                    self.dmsv = None
+                    for st in ('shader split', 'Vulkan shaders'): PROG.stage(st); PROG.end('none: runtime shaders compiled via GLSLC')
+                    return
+                raise
         finally: self.device_oodle_end()
         self.dmsv = self.aw / 'shaders.dmsv'; kf = self.aw / 'shaders.dmsv.key'; cap = self.aw / 'captured_shaders'
         PROG.stage('Vulkan shaders', step='building the translator')
