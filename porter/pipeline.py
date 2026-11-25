@@ -973,7 +973,8 @@ class Port:
         missing = [f.name for f in files if not f.is_file()]
         if missing: say(f'[RED] the gamepad theme {pack.name} has no {", ".join(missing)}: the app draws its gamepad without a theme'); return []
         self.result['theme'] = pack.name; say(f'gamepad theme: {pack.name}')
-        return [a for f in files for a in ('--asset', f'overlay/{f.name}={f}')]
+        bezels = [a for f in sorted((pack / 'bezels').iterdir()) if f.is_file() for a in ('--asset', f'bezels/{f.name}={f}')] if (pack / 'bezels' / 'bezels.tsv').is_file() else []
+        return [a for f in files for a in ('--asset', f'overlay/{f.name}={f}')] + bezels
 
     def ui_font(self):
         """The overlay's font (dm/android/overlay_theme.c dm_overlay_font) and, as its license asks, the license files beside it, as assets/font/"""

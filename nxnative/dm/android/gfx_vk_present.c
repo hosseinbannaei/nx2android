@@ -5,6 +5,7 @@
 #include "gfx_vk.h"
 #include "dm_pacing.h"   // the frame-pacing policy
 #include <android/native_window.h>
+#include <dlfcn.h>
 #include <jni.h>
 #include <string.h>
 #include <math.h>
@@ -166,13 +167,25 @@ static int rot_setup(void) {
     vkUpdateDescriptorSets(V.dev, 1, &wr, 0, NULL);
     return 1;
 }
+static void set_window_fps_hint(ANativeWindow *w) {
+    if (!w) return;
+    static int last_on = -1; static ANativeWindow *last_w;
+    int on = dm_fps120_on();
+    if (w == last_w && on == last_on) return;
+    last_w = w; last_on = on;
+    typedef int32_t (*fn_t)(ANativeWindow *, float, int8_t);
+    static fn_t fn; static int looked;
+    if (!looked) { looked = 1; fn = (fn_t)dlsym(RTLD_DEFAULT, "ANativeWindow_setFrameRate"); }
+    if (fn) { int r = fn(w, on ? 120.0f : 60.0f, 0); VKLOG("[perf] ANativeWindow_setFrameRate(%.0f Hz) -> %d", on ? 120.0f : 60.0f, r); }
+}
 static int swap_make(void) {
     ANativeWindow *w = dm_front_window();
     if (w != g_win) { swap_destroy(); g_win = w; }
     if (!w) return 0;
+    set_window_fps_hint(w);
     int ww = ANativeWindow_getWidth(w), wh = ANativeWindow_getHeight(w);
     if (g_swap && ww > 0 && wh > 0 && ((uint32_t)ww != g_sext.width || (uint32_t)wh != g_sext.height)) swap_destroy();
-    if (g_swap) return 1;
+    if (g_swap) { set_window_fps_hint(w); return 1; }
     VkAndroidSurfaceCreateInfoKHR si = {VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR, NULL, 0, w};
     if (vkCreateAndroidSurfaceKHR(V.inst, &si, NULL, &g_surf)) return 0;
     VkSurfaceCapabilitiesKHR caps; vkGetPhysicalDeviceSurfaceCapabilitiesKHR(V.pd, g_surf, &caps);
@@ -226,6 +239,8 @@ static struct { VkImage img; VkDeviceMemory mem; VkImageView view; VkSampler sam
                 VkPipeline pipe; VkFormat pfmt; uint32_t w, h, sh, pw, ph, gh, gs, gl, cpr, pad; int fk; VkBuffer up; VkDeviceMemory upm; uint8_t *px, *map; int uploaded, panel, lay, cver; float sp[SP_N][4];
                 VkRenderPass rp; VkFramebuffer fb[8]; VkImageView fbview[8]; VkExtent2D fbext[8]; } g_ov;
 static struct { const ov_theme *t; VkImage img; VkDeviceMemory mem; VkImageView view; VkDescriptorSet set; VkBuffer up; VkDeviceMemory upm; uint32_t upk; int ready; } g_tt[2];   // per layout
+static struct { int idx, w, h, ready; VkImage img; VkDeviceMemory mem; VkImageView view; VkDescriptorSet set; VkBuffer up; VkDeviceMemory upm; uint32_t upk; } g_bz;
+static int g_pic_px[4];   // {dx, dy, dw, dh} of the 16:9 game picture in the swapchain image
 // Without dynamic rendering (a Vulkan 1.1 / 1.2 device, V.has_dynrender) the overlay draws in a render pass object over the swapchain image: one pass for the swapchain's
 // format (load and store, the image already in COLOR_ATTACHMENT_OPTIMAL), and a framebuffer per swapchain image, made again when its view or the extent changes
 static VkRenderPass ov_rp(void) {
@@ -416,6 +431,8 @@ static const char *ovm_label(int it) {
     case OVM_COLOUR: return TR("Colour", "颜色");
     case OVM_OUTLINE: return TR("Outline", "描边");
     case OVM_SIZE: return TR("Size", "大小");
+    case OVM_BEZEL: return TR("Bezel", "边框");
+    case OVM_FPS120: return TR("120 FPS", "120 帧");
     case OVM_RESUME: return TR("Resume", "继续游戏");
     default: return "";
     }
@@ -431,11 +448,11 @@ static const char *ovm_button(int it) {
 }
 static const char *ovm_mode(int i) { return i ? TR("Docked", "底座") : TR("Handheld", "掌机"); }
 static const char *ovm_pad(int i) { return i ? TR("Label", "标签") : TR("Position", "位置"); }   // a controller's face buttons (front_android.c pad_labels)
-static int ov_val_n(int it) { return it == OVM_POS ? FPSO_POS_N : it == OVM_COLOUR ? FPSO_COLOUR_N : it == OVM_OUTLINE ? FPSO_OUTLINE_N : it == OVM_SIZE ? FPSO_SIZE_N : 0; }   // the choice rows' values
+static int ov_val_n(int it) { return it == OVM_POS ? FPSO_POS_N : it == OVM_COLOUR ? FPSO_COLOUR_N : it == OVM_OUTLINE ? FPSO_OUTLINE_N : it == OVM_SIZE ? FPSO_SIZE_N : it == OVM_BEZEL ? dm_bezel_count() + 1 : 0; }   // the choice rows' values
 static const char *ov_val_name(int it, int v) {
-    return it == OVM_POS ? FPSO_POS_NAMES[v] : it == OVM_COLOUR ? FPSO_COLOUR_NAMES[v] : it == OVM_OUTLINE ? FPSO_OUTLINE_NAMES[v] : FPSO_SIZE_NAMES[v];
+    return it == OVM_POS ? FPSO_POS_NAMES[v] : it == OVM_COLOUR ? FPSO_COLOUR_NAMES[v] : it == OVM_OUTLINE ? FPSO_OUTLINE_NAMES[v] : it == OVM_BEZEL ? dm_bezel_name(v) : FPSO_SIZE_NAMES[v];
 }
-static int ov_val_cur(int it, int o) { return it == OVM_POS ? fpso_pos(o) : it == OVM_COLOUR ? fpso_colour(o) : it == OVM_OUTLINE ? fpso_outline(o) : fpso_size(o); }
+static int ov_val_cur(int it, int o) { return it == OVM_POS ? fpso_pos(o) : it == OVM_COLOUR ? fpso_colour(o) : it == OVM_OUTLINE ? fpso_outline(o) : it == OVM_BEZEL ? dm_bezel_selected() : fpso_size(o); }
 static float ov_val_w(int it, int is) {   // the widest value's width
     float w = 0; for (int v = 0; v < ov_val_n(it); v++) w = fmaxf(w, cv_text_w(ov_val_name(it, v), is)); return w;
 }
@@ -501,7 +518,7 @@ static void ov_menu_panel(const ov_canvas *cv, int st) {
             cv_rrect(cv, x0 + cur * segw, cy - hh / 2, x0 + (cur + 1) * segw, cy + hh / 2, hh / 2, C_ACCENT);
             for (int k = 0; k < 2; k++) cv_text(cv, x0 + k * segw + (segw - cv_text_w(seg[k], is)) / 2, cy, seg[k], is, k == cur ? C_WHITE : C_DIM);
         } else {   // a switch
-            int on = it >= OVM_ROW_FPS && it <= OVM_ROW_GRAPH ? fpso_rows(fo) >> (it - OVM_ROW_FPS) & 1 : st >> (it == OVM_OVERLAY ? 0 : it == OVM_RUMBLE ? 1 : 3) & 1; float sx0 = x1 - sw;
+            int on = it >= OVM_ROW_FPS && it <= OVM_ROW_GRAPH ? fpso_rows(fo) >> (it - OVM_ROW_FPS) & 1 : it == OVM_FPS120 ? dm_fps120_on() : st >> (it == OVM_OVERLAY ? 0 : it == OVM_RUMBLE ? 1 : 3) & 1; float sx0 = x1 - sw;
             cv_rrect(cv, sx0, cy - sh / 2, x1, cy + sh / 2, sh / 2, on ? C_ACCENT : C_OFF);
             cv_disc(cv, on ? x1 - sh / 2 : sx0 + sh / 2, cy, sh / 2 - fmaxf(2, sh * 0.1f), on ? C_WHITE : C_KNOB_OFF);
             const char *word = on ? TR("ON", "开") : TR("OFF", "关"); cv_text(cv, sx0 - gap - cv_text_w(word, is), cy, word, is, on ? C_WHITE : C_DIM);
@@ -797,6 +814,27 @@ static void ov_render(VkCommandBuffer cb, int mode, int menu, int fps) {
     int edit = menu >= 0 && !(menu & OVT_ST) && (menu & OVE_ST);   // the layout editor: the gamepad over the held frame, every control (shown or not)
     if (edit) mode = 1;
     float bx = g_ov.sp[SP_BLACK][0], by = g_ov.sp[SP_BLACK][1];
+    // Sidebar / top-bottom bezel artwork for any non-16:9 aspect ratio (drawn behind the menu and touch controls)
+    int bz = dm_bezel_selected();
+    if (bz > 0 && g_bz.ready == 1 && g_bz.w > 0 && g_bz.h > 0) {
+        float dx = (float)g_pic_px[0], dy = (float)g_pic_px[1], dw = (float)g_pic_px[2], dh = (float)g_pic_px[3];
+        if (dx > 0 || dy > 0) {
+            vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_ov.layout, 0, 1, &g_bz.set, 0, NULL);
+            if (dx > 0) {
+                float u_span = fminf(0.45f, (dx / H) * ((float)g_bz.h / (float)g_bz.w));
+                if (u_span < 0.05f) u_span = 0.05f;
+                ov_quad ql = {{-1.0f, -1.0f, dx / W * 2 - 1, 1.0f}, {0.0f, 0.0f, u_span, 1.0f}, 1.0f}; ov_draw(cb, &ql);
+                ov_quad qr = {{(dx + dw) / W * 2 - 1, -1.0f, 1.0f, 1.0f}, {1.0f - u_span, 0.0f, 1.0f, 1.0f}, 1.0f}; ov_draw(cb, &qr);
+            }
+            if (dy > 0) {
+                float v_span = fminf(0.45f, (dy / W) * ((float)g_bz.w / (float)g_bz.h));
+                if (v_span < 0.05f) v_span = 0.05f;
+                ov_quad qt = {{-1.0f, -1.0f, 1.0f, dy / H * 2 - 1}, {0.0f, 0.0f, 1.0f, v_span}, 1.0f}; ov_draw(cb, &qt);
+                ov_quad qb = {{-1.0f, (dy + dh) / H * 2 - 1, 1.0f, 1.0f}, {0.0f, 1.0f - v_span, 1.0f, 1.0f}, 1.0f}; ov_draw(cb, &qb);
+            }
+            vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_ov.layout, 0, 1, &g_ov.set, 0, NULL);
+        }
+    }
     if (menu >= 0) g_fg_menu = now;   // (the counter's graph skips the interval across the menu)
     if (menu >= 0 && !edit) {   // paused: the frame dimmed, the panel, and the menu button (which closes it)
         ov_rect(cb, 0, 0, W, H, bx - 2, by - 2, bx + 2, by + 2, 0.55f);
@@ -890,6 +928,50 @@ static void ov_theme_upload(VkCommandBuffer cb, uint32_t k, int lay) {
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &b);
     T->t = t; T->upk = k; T->ready = 1;
 }
+static void ov_bezel_upload(VkCommandBuffer cb, uint32_t k) {
+    if (g_bz.up && (k == g_bz.upk || vkWaitForFences(V.dev, 1, &g_pfence[g_bz.upk], 1, 0) == VK_SUCCESS)) {
+        vkDestroyBuffer(V.dev, g_bz.up, NULL); vkFreeMemory(V.dev, g_bz.upm, NULL); g_bz.up = VK_NULL_HANDLE;
+    }
+    int want = dm_bezel_selected();
+    if (want <= 0 || g_bz.idx == want) return;
+    if (g_bz.img) {
+        vkDeviceWaitIdle(V.dev);
+        if (g_bz.up) { vkDestroyBuffer(V.dev, g_bz.up, NULL); vkFreeMemory(V.dev, g_bz.upm, NULL); g_bz.up = VK_NULL_HANDLE; }
+        vkDestroyImageView(V.dev, g_bz.view, NULL); vkDestroyImage(V.dev, g_bz.img, NULL); vkFreeMemory(V.dev, g_bz.mem, NULL);
+        g_bz.img = VK_NULL_HANDLE; g_bz.view = VK_NULL_HANDLE; g_bz.mem = VK_NULL_HANDLE;
+    }
+    g_bz.idx = want; g_bz.ready = -1;
+    int w = 0, h = 0; uint8_t *px = dm_bezel_load(want, &w, &h);
+    if (!px || w <= 0 || h <= 0) { free(px); return; }
+    VkImageCreateInfo ic = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL, 0, VK_IMAGE_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, {(uint32_t)w, (uint32_t)h, 1}, 1, 1, VK_SAMPLE_COUNT_1_BIT,
+        VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED};
+    VKCHK(vkCreateImage(V.dev, &ic, NULL, &g_bz.img)); VkMemoryRequirements rq; vkGetImageMemoryRequirements(V.dev, g_bz.img, &rq);
+    VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, rq.size, vk_mem_type(rq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0)};
+    VKCHK(vkAllocateMemory(V.dev, &ai, NULL, &g_bz.mem)); VKCHK(vkBindImageMemory(V.dev, g_bz.img, g_bz.mem, 0));
+    VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, NULL, 0, g_bz.img, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, {0}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+    VKCHK(vkCreateImageView(V.dev, &vi, NULL, &g_bz.view));
+    VkDeviceSize n = (VkDeviceSize)w * h * 4;
+    VkBufferCreateInfo bc = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, NULL, 0, n, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_SHARING_MODE_EXCLUSIVE};
+    VKCHK(vkCreateBuffer(V.dev, &bc, NULL, &g_bz.up)); VkMemoryRequirements bq; vkGetBufferMemoryRequirements(V.dev, g_bz.up, &bq);
+    VkMemoryAllocateInfo bi = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, bq.size, vk_mem_type(bq.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 0)};
+    VKCHK(vkAllocateMemory(V.dev, &bi, NULL, &g_bz.upm)); VKCHK(vkBindBufferMemory(V.dev, g_bz.up, g_bz.upm, 0));
+    void *dst; VKCHK(vkMapMemory(V.dev, g_bz.upm, 0, VK_WHOLE_SIZE, 0, &dst)); memcpy(dst, px, (size_t)n); free(px);
+    if (!g_bz.set) {
+        VkDescriptorSetAllocateInfo da = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, NULL, g_ov.pool, 1, &g_ov.dsl};
+        if (vkAllocateDescriptorSets(V.dev, &da, &g_bz.set)) { VKRED_ONCE(96, "bezel descriptor set failed"); return; }
+    }
+    VkDescriptorImageInfo ii = {g_ov.samp, g_bz.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet wr = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, g_bz.set, 0, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &ii};
+    vkUpdateDescriptorSets(V.dev, 1, &wr, 0, NULL);
+    VkImageMemoryBarrier b = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, g_bz.img, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &b);
+    VkBufferImageCopy c = {0, (uint32_t)w, 0, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {(uint32_t)w, (uint32_t)h, 1}};
+    vkCmdCopyBufferToImage(cb, g_bz.up, g_bz.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
+    b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT; b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &b);
+    g_bz.w = w; g_bz.h = h; g_bz.upk = k; g_bz.ready = 1;
+}
 static int overlay_ready(VkCommandBuffer cb, uint32_t k, int menu) {   // k: this present's slot (its fence is not signalled yet)
     uint32_t w = g_sext.width / 2, h = g_sext.height / 2; int lay = dm_overlay_layout();
     if (!g_ov.dsl) {
@@ -897,7 +979,7 @@ static int overlay_ready(VkCommandBuffer cb, uint32_t k, int menu) {   // k: thi
         VkDescriptorSetLayoutCreateInfo li = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, NULL, 0, 1, &b}; VKCHK(vkCreateDescriptorSetLayout(V.dev, &li, NULL, &g_ov.dsl));
         VkPushConstantRange pr = {VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(ov_quad)};
         VkPipelineLayoutCreateInfo pl = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, 1, &g_ov.dsl, 1, &pr}; VKCHK(vkCreatePipelineLayout(V.dev, &pl, NULL, &g_ov.layout));
-        VkDescriptorPoolSize ps = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3}; VkDescriptorPoolCreateInfo pi = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, NULL, 0, 3, 1, &ps};   // the procedural texture, a theme atlas per layout
+        VkDescriptorPoolSize ps = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4}; VkDescriptorPoolCreateInfo pi = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, NULL, 0, 4, 1, &ps};   // the procedural texture, theme atlases, bezel
         VKCHK(vkCreateDescriptorPool(V.dev, &pi, NULL, &g_ov.pool));
         VkDescriptorSetAllocateInfo ai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, NULL, g_ov.pool, 1, &g_ov.dsl}; VKCHK(vkAllocateDescriptorSets(V.dev, &ai, &g_ov.set));
         VkSamplerCreateInfo si = {VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, NULL, 0, VK_FILTER_LINEAR, VK_FILTER_LINEAR, VK_SAMPLER_MIPMAP_MODE_NEAREST,
@@ -962,6 +1044,7 @@ static int overlay_ready(VkCommandBuffer cb, uint32_t k, int menu) {   // k: thi
         vkUpdateDescriptorSets(V.dev, 1, &wr, 0, NULL);
         g_ov.uploaded = 0; g_ov.panel = -1;
     }
+    ov_bezel_upload(cb, k);
     uint32_t y0 = 0, rows = g_ov.h + g_ov.sh + g_ov.ph + g_ov.gh;   // the rows to upload
     // A fence this device's kgsl holds for half a second would freeze the whole menu: wait one frame's worth, and when the copy out of the buffer has not run yet keep
     // the panel as it was this frame: the next redraw, 33 ms on, tries again and the change lands then
@@ -1075,6 +1158,7 @@ static void present_window(vkimg_t *im, const int crop[4], double period, uint64
     { float y0, bh; if (dm_overlay_visible() == 1 && ov_band((float)g_sext.width, (float)g_sext.height, &y0, &bh)) {   // the picture across the top, the gamepad under it (ov_band: never on an external display, whose gamepad stays on the phone)
           s = fmin((double)g_sext.width / cw, (double)y0 / ch); dw = (int)(cw * s); dh = (int)(ch * s); dx = ((int)g_sext.width - dw) / 2; dy = ((int)y0 - dh) / 2; } }
     vk_pic_set((float)dx / g_sext.width, (float)dy / g_sext.height, (float)dw / g_sext.width, (float)dh / g_sext.height);
+    g_pic_px[0] = dx; g_pic_px[1] = dy; g_pic_px[2] = dw; g_pic_px[3] = dh;
     VkImageBlit b = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{cx, cy, 0}, {cx + cw, cy + ch, 1}}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{dx, dy, 0}, {dx + dw, dy + dh, 1}}};
     if (vk_window_bottom_up()) { b.srcOffsets[0].y = cy + ch; b.srcOffsets[1].y = cy; }   // lower-left origin: the window image is stored bottom-up (gfx_vk_exec.c)
     if (im->layout == VK_IMAGE_LAYOUT_UNDEFINED) { barrier(cb, im->img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL); im->layout = VK_IMAGE_LAYOUT_GENERAL; }   // an imported frame buffer, first shown (gl_android.c)
@@ -1083,7 +1167,8 @@ static void present_window(vkimg_t *im, const int crop[4], double period, uint64
     int external = dm_external_active();
     int ovm = external ? 0 : dm_overlay_visible(), menu = external ? -1 : dm_menu_state(), fps = dm_overlay_fps();
     atomic_store_explicit(&g_fg_on, fps && (fpso_rows(dm_fps_opts()) & FPSO_GRAPH), memory_order_relaxed);
-    if ((ovm || menu >= 0 || fps) && overlay_ready(cb, k, menu) && (V.has_dynrender || ov_fb(idx))) {   // without dynamic rendering, only with the image's framebuffer
+    int bzon = !external && dm_bezel_selected() > 0 && (dx > 0 || dy > 0);
+    if ((ovm || menu >= 0 || fps || bzon) && overlay_ready(cb, k, menu) && (V.has_dynrender || ov_fb(idx))) {   // without dynamic rendering, only with the image's framebuffer
         barrier(cb, tgt, lay, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL); lay = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         VkRenderingAttachmentInfo ca = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, NULL, tview, lay, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE};
         VkRenderingInfo ri = {VK_STRUCTURE_TYPE_RENDERING_INFO, NULL, 0, {{0, 0}, g_sext}, 1, 0, 1, &ca, NULL, NULL};

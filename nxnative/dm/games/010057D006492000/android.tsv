@@ -9,4 +9,40 @@ tested	v327680 Red Magic Astra NP05J (Snapdragon 8 Elite, Adreno 830, Android 16
 package	org.nx2a.t010057d006492000
 orientation	landscape
 setting	docked=0
+pacing	steady
 env	DM_VK_MT_REPLAY=1
+env	DM_NVN_ASYNC=1
+env	DM_PIN_REPLAY=prime
+env	DM_VK_POOL_READBACK_RANGES=1
+
+# Mobile-friendly HD-2D JRPG layout: hide unused camera stick and stick clicks (stick_r, ls, rs),
+# keep left stick + compact D-pad on left, A/B/X/Y diamond + Boost (L/R) & triggers on right, and +/- in upper corners.
+overlay_hide	both	stick_r
+overlay_hide	both	ls
+overlay_hide	both	rs
+
+overlay	phone	stick_l	0.115	0.710
+overlay	phone	dpad	0.250	0.785
+overlay	phone	zl	0.060	0.340
+overlay	phone	l	0.165	0.340
+overlay	phone	minus	0.055	0.145
+overlay	phone	a	0.915	0.665
+overlay	phone	b	0.845	0.790
+overlay	phone	x	0.845	0.540
+overlay	phone	y	0.775	0.665
+overlay	phone	r	0.835	0.340
+overlay	phone	zr	0.935	0.340
+overlay	phone	plus	0.945	0.145
+
+overlay	tablet	stick_l	0.130	0.710
+overlay	tablet	dpad	0.275	0.785
+overlay	tablet	zl	0.070	0.350
+overlay	tablet	l	0.180	0.350
+overlay	tablet	minus	0.065	0.155
+overlay	tablet	a	0.910	0.665
+overlay	tablet	b	0.840	0.790
+overlay	tablet	x	0.840	0.540
+overlay	tablet	y	0.770	0.665
+overlay	tablet	r	0.830	0.350
+overlay	tablet	zr	0.930	0.350
+overlay	tablet	plus	0.935	0.155

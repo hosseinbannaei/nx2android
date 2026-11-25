@@ -1553,6 +1553,7 @@ __attribute__((weak)) void dm_main_yield_stats(uint64_t *n, uint64_t *ns) { *n =
 __attribute__((weak)) uint32_t dm_guest_work_qos(unsigned *count) { if (count) *count = 0; return QOS_CLASS_UNSPECIFIED; }
 __attribute__((weak)) void dm_perf_frame_start(uint64_t pace_ns, uint64_t pq_ns) { (void)pace_ns; (void)pq_ns; }   // Android (perf_android.c): a frame's work starts, for the CPU performance hint
 __attribute__((weak)) uint64_t dm_present_period_adapt(uint64_t period) { return period; }   // Android (perf_android.c): a longer period the frames can hold steadily
+__attribute__((weak)) int dm_fps120_on(void) { return 0; }
 __attribute__((weak)) void dm_yield_top(char *out, size_t n) { if (n) snprintf(out, n, "-"); }   // hle_thread.c: the threads that yielded most since the last call; none in graphics unit tests
 __attribute__((weak)) void dm_thread_cpu(char *out, size_t n, double secs) { (void)secs; if (n) snprintf(out, n, "-"); }   // hle_thread.c: guest-thread CPU by Switch priority band since the last call
 void mtl_res_stats(char *out, size_t n);
@@ -1881,7 +1882,7 @@ static uint64_t present_period(const win_t *o) {
         if (want < 2) atomic_store(&g_itv2_since, 0);
         else if (was < 2) atomic_store(&g_itv2_since, now_ns() | 1);   // | 1: the start is never 0
     }
-    int itv = present_itv(o), hz = g_hz;
+    int itv = present_itv(o), hz = dm_fps120_on() && itv == 1 ? 120 : g_hz;
     return dm_present_period_adapt(hz > 0 ? (uint64_t)itv * 1000000000ull / (uint64_t)hz : 0);
 }
 // The period the acquire thread declares to the scheduler (set_time_constraint): the present period, except that a hold the frame step raised for late frames keeps the cap's deadline.

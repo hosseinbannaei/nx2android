@@ -197,6 +197,11 @@ typedef struct { int layout, w, h; uint8_t *px; float dh, scale, travel, alpha; 
                                                                                                                        // scale: texels per CSS px; travel: the knob's, CSS px
 const ov_theme *dm_overlay_theme(int layout);   // the theme's sprites for a layout, NULL when the app has none (it keeps its pixels until dm_overlay_theme_done)
 void dm_overlay_theme_done(const ov_theme *t);   // the pixels are on the GPU: their memory can go
+int dm_bezel_count(void);
+const char *dm_bezel_name(int idx);
+uint8_t *dm_bezel_load(int idx, int *w, int *h);
+int dm_bezel_selected(void);
+int dm_fps120_on(void);
 
 // ---- the frame rate counter's options (settings.txt fps_rows, fps_pos, fps_colour, fps_outline, fps_size), packed in one int for the backend (dm_fps_opts) ----
 enum { FPSO_FPS = 1, FPSO_SOC = 2, FPSO_BAT = 4, FPSO_DRV = 8, FPSO_GRAPH = 16, FPSO_ALL = 31, FPSO_ROWS_DEFAULT = FPSO_FPS | FPSO_SOC | FPSO_BAT };   // fps_rows: the rows shown, a bit each (the driver row: the Vulkan driver in use; the graph: the frame times, one bar a frame); by default FPS, SOC and BAT, the counter before these options (the driver row and the graph would make it reach the - button or L and ZL on a 1920x1080 window)
@@ -228,14 +233,11 @@ static inline int fpso_scale(int base, int size) { return size == FPSO_SMALL ? (
 // ---- the pause menu: a panel in the middle of the window: a row of tabs, the open tab's rows, and Resume. Everything is placed in a panel rectangle p
 // (x, y, width, height: the window's for touches, the raster's for drawing), so the touches and the drawing agree ----
 enum { OVM_OVERLAY, OVM_OPACITY, OVM_EDIT, OVM_RUMBLE, OVM_FPS, OVM_MODE, OVM_EXPORT, OVM_IMPORT, OVM_PAD, OVM_AUDIO,
-       OVM_ROW_FPS, OVM_ROW_SOC, OVM_ROW_BAT, OVM_ROW_DRV, OVM_ROW_GRAPH, OVM_POS, OVM_COLOUR, OVM_OUTLINE, OVM_SIZE, OVM_RESUME, OVM_TAB, OVM_N };   // OVM_TAB: the tabs' row;
-            // OVM_ROW_*: the counter's rows on or off; OVM_POS .. OVM_SIZE: its corner, colour, outline and size, one value on with each press (fpso_step below);
-            // OVM_EDIT: the layout editor; OVM_MODE: handheld (performance) or docked (resolution); OVM_EXPORT, OVM_IMPORT: the save manager (saves_android.c);
-            // OVM_PAD: a controller's face buttons by their position or by their label (front_android.c pad_labels)
+       OVM_ROW_FPS, OVM_ROW_SOC, OVM_ROW_BAT, OVM_ROW_DRV, OVM_ROW_GRAPH, OVM_POS, OVM_COLOUR, OVM_OUTLINE, OVM_SIZE, OVM_BEZEL, OVM_FPS120, OVM_RESUME, OVM_TAB, OVM_N };
 #define OVM_TABS 4   // (a power of two: ov_menu_item masks the tab)
-#define OVM_PER_TAB 5
-static const int OVM_TAB_ITEMS[OVM_TABS][OVM_PER_TAB] = {{OVM_OVERLAY, OVM_OPACITY, OVM_EDIT, OVM_RUMBLE, OVM_PAD}, {OVM_FPS, OVM_MODE, OVM_EXPORT, OVM_IMPORT, OVM_AUDIO},
-                                                         {OVM_ROW_FPS, OVM_ROW_SOC, OVM_ROW_BAT, OVM_ROW_DRV, OVM_ROW_GRAPH}, {OVM_POS, OVM_COLOUR, OVM_OUTLINE, OVM_SIZE, -1}};
+#define OVM_PER_TAB 6
+static const int OVM_TAB_ITEMS[OVM_TABS][OVM_PER_TAB] = {{OVM_OVERLAY, OVM_OPACITY, OVM_EDIT, OVM_RUMBLE, OVM_PAD, -1}, {OVM_FPS, OVM_MODE, OVM_EXPORT, OVM_IMPORT, OVM_AUDIO, OVM_FPS120},
+                                                         {OVM_ROW_FPS, OVM_ROW_SOC, OVM_ROW_BAT, OVM_ROW_DRV, OVM_ROW_GRAPH, -1}, {OVM_POS, OVM_COLOUR, OVM_OUTLINE, OVM_SIZE, OVM_BEZEL, -1}};
 static const char *const OVM_TAB_NAMES_EN[OVM_TABS] = {"Gamepad", "Game", "Counter", "Style"};
 static const char *const OVM_TAB_NAMES_ZH[OVM_TABS] = {"手柄", "游戏", "计数", "样式"};
 #define OVM_TAB_NAMES (dm_ui_zh() ? OVM_TAB_NAMES_ZH : OVM_TAB_NAMES_EN)
@@ -259,7 +261,9 @@ static inline int fpso_step(int o, int item) {   // the options after a press on
 int dm_menu_audio_available(void);
 static inline int ov_menu_item(int tab, int row) {
     int item = row == 0 ? OVM_TAB : row == OVM_ROWS - 1 ? OVM_RESUME : row > 0 && row < OVM_ROWS - 1 ? OVM_TAB_ITEMS[tab & (OVM_TABS - 1)][row - 1] : -1;
-    return item == OVM_AUDIO && !dm_menu_audio_available() ? -1 : item;
+    if (item == OVM_AUDIO && !dm_menu_audio_available()) return -1;
+    if (item == OVM_BEZEL && !dm_bezel_count()) return -1;
+    return item;
 }
 #define OV_MENU_ROW 0.115f   // row height, of the window's height
 #define OV_MENU_W 0.95f      // panel width, of the window's height

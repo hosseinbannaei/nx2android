@@ -182,7 +182,13 @@ def update(adb, package, jobs=os.cpu_count() or 8):
         adb.run('pull', installed_apk(adb, package), src, timeout=600)
         from porter.pipeline import ui_font_assets   # the overlay's font: an APK ported before it came has none, and the new host looks for it
         fonts = [a for n, f in ui_font_assets().items() for a in ('--asset', f'{n}={f}')]
-        r = subprocess.run([sys.executable, str(DM / 'android/apk/apkdriver.py'), str(src), str(out), str(paths.signing_key()), '--host', str(so)] + fonts,
+        sys.path.insert(0, str(DM / 'android/tools'))
+        try: import android_profile
+        finally: sys.path.pop(0)
+        pack = android_profile.theme(title_id)
+        theme = [a for f in ('theme.tsv', 'tablet.png', 'phone.png') if (pack / f).is_file() for a in ('--asset', f'overlay/{f}={pack / f}')]
+        bezels = [a for f in sorted((pack / 'bezels').iterdir()) if f.is_file() for a in ('--asset', f'bezels/{f.name}={f}')] if (pack / 'bezels' / 'bezels.tsv').is_file() else []
+        r = subprocess.run([sys.executable, str(DM / 'android/apk/apkdriver.py'), str(src), str(out), str(paths.signing_key()), '--host', str(so)] + fonts + theme + bezels,
                            capture_output=True, text=True, errors='replace')
         if r.returncode: raise BuildError((r.stderr.strip() or r.stdout.strip()).splitlines()[-1])
         size = so.stat().st_size

@@ -79,6 +79,10 @@ void dm_focus_set(int st); void dm_audio_suspend(int on); void guest_clock_freez
 static char g_root[512];
 static _Atomic int g_set_overlay = 1, g_set_rumble = 1, g_set_fps;   // the gamepad shown; rumble and tap vibration; the frame rate counter (top left)
 static _Atomic int g_set_opacity = 60;   // the gamepad's opacity, percent (OV_OPACITY_MIN..MAX: the menu's Opacity slider)
+static _Atomic int g_set_bezel = 1;      // the sidebar bezel index (0 = Off, 1..N = bezels.tsv)
+static _Atomic int g_set_fps120;         // 120 FPS target toggle (0 = 60 Hz, 1 = 120 Hz)
+int dm_bezel_selected(void) { int n = dm_bezel_count(); if (n <= 0) return 0; int v = atomic_load(&g_set_bezel); return v < 0 ? 0 : v > n ? 1 : v; }
+int dm_fps120_on(void) { return atomic_load(&g_set_fps120); }
 static _Atomic int g_set_grid;   // the layout editor's Snap to grid
 // the menu button in play (issue #397): env.txt's DM_MENU_BUTTON=0 (porter port --no-menu-button) leaves it out, as a control the player hid (dm_overlay_hidden):
 // not drawn and not touchable, on the gamepad and over the pause menu, so its corner of the screen is the game's. Back (the system's back gesture or key) and a
@@ -119,6 +123,12 @@ static int fps_opt_press(int item) {   // a menu item of the Counter or Style ta
 // FPS_OPTS_END
 int dm_fps_opts(void) { return atomic_load(&g_fps_opts); }   // gfx_vk_present.c: the counter's options, packed (fpso_*)
 static void settings_load(void) {
+#ifdef DM_AOV_HIDE_TABLET
+    for (int i = 0; i < OV_N; i++) {
+        if ((DM_AOV_HIDE_TABLET >> i) & 1u) atomic_store(&g_cust[0][0][i][3], 1);
+        if ((DM_AOV_HIDE_PHONE >> i) & 1u) atomic_store(&g_cust[0][1][i][3], 1);
+    }
+#endif
     char p[600]; snprintf(p, sizeof p, "%s/settings.txt", g_root); FILE *f = fopen(p, "r"); char line[128];
     if (!f) return;
     while (fgets(line, sizeof line, f)) { int v; if (sscanf(line, "overlay=%d", &v) == 1) atomic_store(&g_set_overlay, v != 0); else if (sscanf(line, "rumble=%d", &v) == 1) atomic_store(&g_set_rumble, v != 0);
@@ -126,6 +136,8 @@ static void settings_load(void) {
         else if (fps_opt_parse(line)) {}
         else if (sscanf(line, "docked=%d", &v) == 1) setenv("DM_OPMODE", v ? "1" : "0", 1);   // over env.txt's: the host reads it once, at its first query
         else if (sscanf(line, "opacity=%d", &v) == 1) atomic_store(&g_set_opacity, v < OV_OPACITY_MIN ? OV_OPACITY_MIN : v > OV_OPACITY_MAX ? OV_OPACITY_MAX : v);
+        else if (sscanf(line, "bezel=%d", &v) == 1) atomic_store(&g_set_bezel, v);
+        else if (sscanf(line, "fps120=%d", &v) == 1) atomic_store(&g_set_fps120, v != 0);
         else if (sscanf(line, "grid=%d", &v) == 1) atomic_store(&g_set_grid, v != 0);
         else if (sscanf(line, "labels=%d", &v) == 1) atomic_store(&g_set_labels, v != 0);
         else if (!strncmp(line, "ui=", 3)) {   // ui=<layout>,<control>,<x>,<y>,<size>[,<hidden>]: x, y in 1/10000 of the window (-1 the layout's place), size in 1/1000
@@ -135,7 +147,7 @@ static void settings_load(void) {
             if (l == 2) continue;
             if (x >= 0 && x <= 10000 && y >= 0 && y <= 10000) { atomic_store(&g_cust[0][l][i][0], x + 1); atomic_store(&g_cust[0][l][i][1], y + 1); }
             if (z >= OVE_SCALE_MIN * 1000 && z <= OVE_SCALE_MAX * 1000) atomic_store(&g_cust[0][l][i][2], z);
-            if (hid == 1 && OV_LAYOUTS[l][i].kind != OV_MENU) atomic_store(&g_cust[0][l][i][3], 1);
+            if ((hid == 0 || hid == 1) && OV_LAYOUTS[l][i].kind != OV_MENU) atomic_store(&g_cust[0][l][i][3], hid);
         } else if (sscanf(line, "menu_x=%d", &v) == 1 && v >= 0 && v <= 10000) { int m = ctl_named("menu"); for (int l = 0; l < 2 && m >= 0; l++) atomic_store(&g_cust[0][l][m][0], v + 1); }   // before
         else if (sscanf(line, "menu_y=%d", &v) == 1 && v >= 0 && v <= 10000) { int m = ctl_named("menu"); for (int l = 0; l < 2 && m >= 0; l++) atomic_store(&g_cust[0][l][m][1], v + 1); }   // the editor
     }
@@ -144,8 +156,8 @@ static void settings_load(void) {
 static void settings_save(void) {
     char p[600], tmp[610]; snprintf(p, sizeof p, "%s/settings.txt", g_root); snprintf(tmp, sizeof tmp, "%s.new", p);
     FILE *f = fopen(tmp, "w"); if (!f) { LOG("[RED] cannot write %s", tmp); return; }
-    fprintf(f, "overlay=%d\nrumble=%d\ndocked=%d\nfps=%d\nopacity=%d\ngrid=%d\n", atomic_load(&g_set_overlay), atomic_load(&g_set_rumble), dm_opmode() != 0, atomic_load(&g_set_fps),
-            atomic_load(&g_set_opacity), atomic_load(&g_set_grid));
+    fprintf(f, "overlay=%d\nrumble=%d\ndocked=%d\nfps=%d\nopacity=%d\nbezel=%d\nfps120=%d\ngrid=%d\n", atomic_load(&g_set_overlay), atomic_load(&g_set_rumble), dm_opmode() != 0, atomic_load(&g_set_fps),
+            atomic_load(&g_set_opacity), dm_bezel_selected(), atomic_load(&g_set_fps120), atomic_load(&g_set_grid));
     fps_opt_write(f);
     if (atomic_load(&g_set_labels) >= 0) fprintf(f, "labels=%d\n", atomic_load(&g_set_labels));   // (only once the player chose: until then env.txt decides)
     for (int l = 0; l < 2; l++) for (int i = 0; i < OV_N; i++) {
@@ -180,7 +192,61 @@ static void on_pause(ANativeActivity *a) { (void)a; go_background(); dm_perf_gpu
 // Back in front, the game is out of focus until the window has the input focus again (Android sends it after onResume): without this it stayed OutOfFocus for good,
 // and Blasphemous 2's Unity, which asks for focus notifications, kept its title paused and ignored every press after a trip to another app. A window losing focus while in
 // front (a system dialog, the notification shade) is OutOfFocus as on the Switch's HOME overlay
-static void on_window_focus(ANativeActivity *a, int focused) { (void)a; if (atomic_load(&g_running) && !atomic_load(&g_bg)) dm_focus_set(focused ? 1 : 2); }
+static void apply_immersive(ANativeActivity *a) {
+    if (!a || !a->env || !a->clazz) return;
+    JNIEnv *env = a->env;
+    jclass act_cls = (*env)->GetObjectClass(env, a->clazz);
+    jmethodID get_win = act_cls ? (*env)->GetMethodID(env, act_cls, "getWindow", "()Landroid/view/Window;") : NULL;
+    jobject win = get_win ? (*env)->CallObjectMethod(env, a->clazz, get_win) : NULL;
+    if (win) {
+        jclass win_cls = (*env)->GetObjectClass(env, win);
+        // Display cutout: extend into notch/cutout edges (API 28+: SHORT_EDGES = 1, API 30+: ALWAYS = 3)
+        jmethodID get_attr = (*env)->GetMethodID(env, win_cls, "getAttributes", "()Landroid/view/WindowManager$LayoutParams;");
+        jmethodID set_attr = (*env)->GetMethodID(env, win_cls, "setAttributes", "(Landroid/view/WindowManager$LayoutParams;)V");
+        jobject lp = get_attr ? (*env)->CallObjectMethod(env, win, get_attr) : NULL;
+        if (lp) {
+            jclass lp_cls = (*env)->GetObjectClass(env, lp);
+            jfieldID cutout = (*env)->GetFieldID(env, lp_cls, "layoutInDisplayCutoutMode", "I");
+            if (cutout) { (*env)->SetIntField(env, lp, cutout, 1); (*env)->CallVoidMethod(env, win, set_attr, lp); }
+            (*env)->DeleteLocalRef(env, lp_cls); (*env)->DeleteLocalRef(env, lp);
+        }
+        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+        // API 30+: Window.setDecorFitsSystemWindows(false) + WindowInsetsController.hide(systemBars) + BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE (2)
+        jmethodID set_fits = (*env)->GetMethodID(env, win_cls, "setDecorFitsSystemWindows", "(Z)V");
+        jmethodID get_ic = (*env)->GetMethodID(env, win_cls, "getInsetsController", "()Landroid/view/WindowInsetsController;");
+        if (set_fits && get_ic) {
+            (*env)->CallVoidMethod(env, win, set_fits, JNI_FALSE);
+            jobject ic = (*env)->CallObjectMethod(env, win, get_ic);
+            if (ic) {
+                jclass ic_cls = (*env)->GetObjectClass(env, ic);
+                jmethodID set_beh = (*env)->GetMethodID(env, ic_cls, "setSystemBarsBehavior", "(I)V");
+                jmethodID hide = (*env)->GetMethodID(env, ic_cls, "hide", "(I)V");
+                jclass type_cls = (*env)->FindClass(env, "android/view/WindowInsets$Type");
+                jmethodID sys_bars = type_cls ? (*env)->GetStaticMethodID(env, type_cls, "systemBars", "()I") : NULL;
+                if (set_beh && hide && sys_bars) {
+                    (*env)->CallVoidMethod(env, ic, set_beh, 2);
+                    (*env)->CallVoidMethod(env, ic, hide, (*env)->CallStaticIntMethod(env, type_cls, sys_bars));
+                }
+                if (type_cls) (*env)->DeleteLocalRef(env, type_cls);
+                (*env)->DeleteLocalRef(env, ic_cls); (*env)->DeleteLocalRef(env, ic);
+            }
+        } else {
+            if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+            jmethodID get_decor = (*env)->GetMethodID(env, win_cls, "getDecorView", "()Landroid/view/View;");
+            jobject decor = get_decor ? (*env)->CallObjectMethod(env, win, get_decor) : NULL;
+            if (decor) {
+                jclass view_cls = (*env)->GetObjectClass(env, decor);
+                jmethodID set_vis = (*env)->GetMethodID(env, view_cls, "setSystemUiVisibility", "(I)V");
+                if (set_vis) (*env)->CallVoidMethod(env, decor, set_vis, 0x1706);
+                (*env)->DeleteLocalRef(env, view_cls); (*env)->DeleteLocalRef(env, decor);
+            }
+        }
+        (*env)->DeleteLocalRef(env, win_cls); (*env)->DeleteLocalRef(env, win);
+    }
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    if (act_cls) (*env)->DeleteLocalRef(env, act_cls);
+}
+static void on_window_focus(ANativeActivity *a, int focused) { if (focused) apply_immersive(a); if (atomic_load(&g_running) && !atomic_load(&g_bg)) dm_focus_set(focused ? 1 : 2); }
 // A save manager's request, or a RomFS the app cannot read (romfs_readable), asked the app to end (ANativeActivity_onCreate): Activity.finish() when it is resumed, through JNI on the main thread.
 // ANativeActivity_finish, from onCreate or from here, left the activity on the screen (Y700, Android 16), and porter's am start -W waited out its timeout
 static int g_quit;
@@ -687,6 +753,8 @@ static void menu_do(int item) {
     else if (item == OVM_RUMBLE) { int on = !atomic_load(&g_set_rumble); atomic_store(&g_set_rumble, on); dm_haptics_android_set(on); settings_save(); }
     else if (item == OVM_FPS) { atomic_store(&g_set_fps, !atomic_load(&g_set_fps)); settings_save(); }
     else if (fps_opt_press(item)) settings_save();   // the counter's rows, corner, colour, outline and size
+    else if (item == OVM_BEZEL) { int n = dm_bezel_count(); if (n > 0) { atomic_store(&g_set_bezel, (dm_bezel_selected() + 1) % (n + 1)); atomic_fetch_add(&g_fps_ver, 1); settings_save(); } }
+    else if (item == OVM_FPS120) { atomic_store(&g_set_fps120, !atomic_load(&g_set_fps120)); atomic_fetch_add(&g_fps_ver, 1); settings_save(); }
     else if (item == OVM_MODE) { dm_set_opmode(dm_opmode() ? 0 : 1); settings_save(); }   // the game takes it when it goes on
     else if (item == OVM_PAD) { atomic_store(&g_set_labels, !pad_labels()); settings_save(); }   // at once (pad_labels)
     else if (item == OVM_TAB) { menu_tab(atomic_load(&g_menu_tab) + 1); return; }
@@ -734,6 +802,7 @@ static void menu_key(uint64_t bit) {   // a controller key pressed while the men
         for (int k = 0; k < OVM_ROWS; k++) { hi = hi < 0 ? (bit == DM_BTN_UP ? OVM_ROWS - 1 : 1) : (hi + (bit == DM_BTN_UP ? OVM_ROWS - 1 : 1)) % OVM_ROWS; if (ov_menu_item(tab, hi) >= 0) break; }
         atomic_store(&g_menu_hi, hi); dm_overlay_redraw();
     } else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_OPACITY) { menu_opacity(atomic_load(&g_set_opacity) + (bit == DM_BTN_LEFT ? -5 : 5)); settings_save(); }
+    else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_BEZEL) { int n = dm_bezel_count(); if (n > 0) { atomic_store(&g_set_bezel, (dm_bezel_selected() + (bit == DM_BTN_LEFT ? n : 1)) % (n + 1)); atomic_fetch_add(&g_fps_ver, 1); settings_save(); dm_overlay_redraw(); } }
     else if ((bit == DM_BTN_LEFT || bit == DM_BTN_RIGHT) && item == OVM_TAB) menu_tab(tab + (bit == DM_BTN_LEFT ? -1 : 1));
     else if (bit == DM_BTN_L || bit == DM_BTN_ZL || bit == DM_BTN_R || bit == DM_BTN_ZR) {
         menu_tab(tab + (bit == DM_BTN_L || bit == DM_BTN_ZL ? -1 : 1));
@@ -1449,6 +1518,7 @@ __attribute__((visibility("default"))) void ANativeActivity_onCreate(ANativeActi
     act->callbacks->onInputQueueCreated = on_queue_created; act->callbacks->onInputQueueDestroyed = on_queue_destroyed;
     act->callbacks->onPause = on_pause; act->callbacks->onResume = on_resume; act->callbacks->onWindowFocusChanged = on_window_focus; act->callbacks->onDestroy = on_destroy;
     ANativeActivity_setWindowFlags(act, AWINDOW_FLAG_KEEP_SCREEN_ON | AWINDOW_FLAG_FULLSCREEN, 0);
+    apply_immersive(act);
     static int started; if (started++) return;   // a second onCreate (configuration change) keeps the running game
     JNIEnv *env = act->env;
     jclass activity_class = (*env)->GetObjectClass(env, act->clazz);

@@ -12,8 +12,8 @@
 int dm_pacing_target(const char **src) {
     const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET;
     if (src) *src = e ? "DM_FPS_TARGET" : "game profile fps_target";
-    if (t != 0 && t != 30 && t != 60) {
-        static int said; if (!said++) PLOG("[RED] DM_FPS_TARGET=%s: must be 0, 30 or 60; the game's own frame limit is used", e ? e : "(profile)");
+    if (t != 0 && t != 30 && t != 60 && t != 120) {
+        static int said; if (!said++) PLOG("[RED] DM_FPS_TARGET=%s: must be 0, 30, 60 or 120; the game's own frame limit is used", e ? e : "(profile)");
         t = 0;
     }
     return t;

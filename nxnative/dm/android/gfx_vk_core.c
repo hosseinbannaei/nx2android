@@ -1080,13 +1080,18 @@ static uint64_t g_sync_bytes, g_sync_full;   // copied pools: bytes copied by th
 // Copied pools: the guest's bytes into the GPU copy. The first sync copies the whole pool; later ones copy only the 64 KB blocks with pages the CPU wrote since the last
 // sync (nvn_dirty's write-protect tracking: a block is protected again before it is copied, so a write during the copy is caught by the next sync). An 860 MB
 // pool copied whole at every submission (Unicorn Overlord on a Legion Y700 2023) ran at a few frames a second
-static void vk_pools_sync_(VkCommandBuffer cb);
-void vk_pools_sync(VkCommandBuffer cb) { extern int g_prof_on; extern uint64_t g_prof_ns[8]; struct timespec a, b; if (g_prof_on) clock_gettime(CLOCK_MONOTONIC, &a);
+static uint64_t g_fence; int mtl_wait(uint64_t fence, uint64_t timeout_ns);
+static void vk_pools_sync_impl(VkCommandBuffer cb, int async);
+static void vk_pools_sync_run(VkCommandBuffer cb, int async) {
+    extern int g_prof_on; extern uint64_t g_prof_ns[8]; struct timespec a, b; if (g_prof_on) clock_gettime(CLOCK_MONOTONIC, &a);
     int diag = mem_diag_on(); uint64_t t = diag ? mem_diag_ns() : 0, bytes = diag ? g_sync_bytes : 0;
-    vk_pools_sync_(cb); if (diag) mem_diag_note(1, t, g_sync_bytes - bytes);
-    if (g_prof_on) { clock_gettime(CLOCK_MONOTONIC, &b); g_prof_ns[2] += (uint64_t)((b.tv_sec - a.tv_sec) * 1000000000ll + (b.tv_nsec - a.tv_nsec)); } }
-static void vk_pools_sync_(VkCommandBuffer cb) {
-    (void)cb;
+    vk_pools_sync_impl(cb, async);
+    if (diag) mem_diag_note(1, t, g_sync_bytes - bytes);
+    if (g_prof_on) { clock_gettime(CLOCK_MONOTONIC, &b); g_prof_ns[2] += (uint64_t)((b.tv_sec - a.tv_sec) * 1000000000ll + (b.tv_nsec - a.tv_nsec)); }
+}
+void vk_pools_sync(VkCommandBuffer cb) { vk_pools_sync_run(cb, 0); }
+static void vk_pools_sync_impl(VkCommandBuffer cb, int async) {
+    int use_cb = async || cb != NULL, cb_barrier = 0, waited_all = 0;
     int diag = mem_diag_on(); uint64_t ns[4] = {0}, amount[4] = {0};
     uint64_t reason_count[4] = {0}, reason_bytes[4] = {0};
 #define SYNC_MEASURE(k, n, op) do { if (diag) { uint64_t t_ = mem_diag_ns(); op; ns[k] += mem_diag_ns() - t_; amount[k] += (n); } else { op; } } while (0)
@@ -1099,9 +1104,10 @@ static void vk_pools_sync_(VkCommandBuffer cb) {
             p->synced = 0; if (mem_diag_on()) VKLOG("[memdiag] copy-back baseline allocated: %.2f MiB", size / 1048576.0); }
         if (!p->span && (p->span = nvn_dirty_span(lo, size))) p->synced = 0;   // tracked only now: copied whole once more, protected
         if (!p->synced || !p->span) {   // untracked: every sync copies all of it, as before
+            if (use_cb && !waited_all) { mtl_wait(g_fence, ~0ull); waited_all = 1; }
             if (diag) { int reason = !p->synced ? 0 : 1; reason_count[reason]++; reason_bytes[reason] += size; }
             if (p->span) SYNC_MEASURE(1, size, nvn_dirty_protect(lo, size));
-            SYNC_MEASURE(2, size, memcpy(p->shadow, lo, size)); SYNC_MEASURE(3, size, memcpy(p->baseline, p->shadow, size)); pool_cache_sync(p, 0, 0, size); g_sync_bytes += size; g_sync_full++; p->synced = 1; p->baseline_complete = 0; p->stamp0 = p->stamp = st; continue; }
+            SYNC_MEASURE(2, size, memcpy(p->shadow, lo, size)); SYNC_MEASURE(3, size, memcpy(p->baseline, p->shadow, size)); pool_cache_sync(p, 0, 0, size); g_sync_bytes += size; g_sync_full++; p->synced = 1; p->baseline_complete = use_cb ? 1 : 0; p->stamp0 = p->stamp = st; continue; }
         // judged against the sync before the last: a write whose fault took its generation before the last sync's stamp but stored it after that sync looked
         // at its block would otherwise never count (its page is writable from then on, and clean by every later stamp). A dirty block is copied twice
         uint64_t first = size, last = 0;
@@ -1110,18 +1116,28 @@ static void vk_pools_sync_(VkCommandBuffer cb) {
             uint64_t n = size - off < BLK ? size - off : BLK;
             if (!nvn_dirty_since_span(p->span, lo + off, n, p->stamp0)) continue;
             SYNC_MEASURE(1, n, nvn_dirty_protect(lo + off, n));
-            SYNC_MEASURE(2, n, memcpy(p->shadow + off, lo + off, n)); g_sync_bytes += n;
+            if (use_cb) {
+                if (!cb) cb = vk_upload_cmd();
+                if (!cb_barrier) { vk_img_barrier_all(cb); cb_barrier = 1; }
+                VkBuffer sb; VkDeviceSize so; uint8_t *st_buf = vk_scratch(n, 16, &sb, &so);
+                SYNC_MEASURE(2, n, memcpy(st_buf, lo + off, n));
+                VkBufferCopy r = {so, p->boff + off, n}; vkCmdCopyBuffer(cb, sb, p->buf, 1, &r);
+                SYNC_MEASURE(3, n, memcpy(p->baseline + off, st_buf, n));
+            } else {
+                SYNC_MEASURE(2, n, memcpy(p->shadow + off, lo + off, n));
+                if (p->baseline_complete) SYNC_MEASURE(3, n, memcpy(p->baseline + off, p->shadow + off, n));
+            }
+            g_sync_bytes += n;
             if (off < first) first = off; last = off + n;
-            if (p->baseline_complete) SYNC_MEASURE(3, n, memcpy(p->baseline + off, p->shadow + off, n));
         }
         // A full merge already refreshed the baseline; only uploaded blocks changed. A pool synced again with no merge since (no completion) takes a full snapshot.
         if (diag) { ns[0] += mem_diag_ns() - scan_start - (ns[1] + ns[2] + ns[3] - work_start); amount[0] += size; }
-        if (!p->baseline_complete) {
+        if (!use_cb && !p->baseline_complete) {
             if (diag) { int reason = p->flags & 0x2 ? 2 : 3; reason_count[reason]++; reason_bytes[reason] += size; }
             SYNC_MEASURE(3, size, memcpy(p->baseline, p->shadow, size));
         }
-        if (last) pool_cache_sync(p, 0, first, last);
-        p->baseline_complete = 0;
+        if (!use_cb && last) pool_cache_sync(p, 0, first, last);
+        p->baseline_complete = use_cb ? 1 : 0;
         p->stamp0 = p->stamp; p->stamp = st;
     }
     pthread_rwlock_unlock(&g_pool_mu);
@@ -1484,6 +1500,12 @@ VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout l) {
 static void post(post_op o) { vksub_t *s = cur(); if (s->npost == s->cappost) { s->cappost = s->cappost ? 2 * s->cappost : 64; s->post = realloc(s->post, s->cappost * sizeof *s->post); } s->post[s->npost++] = o; }
 void mtl_init(void) { vk_init(); }
 static int g_shadow_pools;
+static uint64_t g_copyback_fence;
+static int pool_async_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("DM_VK_POOL_ASYNC"); on = !(e && !atoi(e)); }
+    return on;
+}
 static void pools_readback_barrier(VkCommandBuffer cb) {
     if (!g_shadow_pools) return;
     // The last part can be dropped after earlier ones were sent; each part must publish its writes for the CPU merge.
@@ -1508,8 +1530,14 @@ static void begin_segment(int continuing) {
     g_shadow_pools = shadow;
     if (shadow) {
         int diag = mem_diag_on(); uint64_t t = diag ? mem_diag_ns() : 0;
-        mtl_wait(g_fence, ~0ull); if (diag) mem_diag_note(0, t, 0);
-        vk_pools_sync(NULL);
+        if (pool_async_on()) {
+            if (g_copyback_fence > vk_fence_done()) mtl_wait(g_copyback_fence, ~0ull);
+            if (diag) mem_diag_note(0, t, 0);
+            vk_pools_sync_run(NULL, 1);
+        } else {
+            mtl_wait(g_fence, ~0ull); if (diag) mem_diag_note(0, t, 0);
+            vk_pools_sync(NULL);
+        }
     }   // (after the completion thread's copy-back of the last submission, not only its GPU work)
     if (g_tsq) { vkCmdResetQueryPool(s->main, g_tsq, 2 * (uint32_t)g_cur, 2); vkCmdWriteTimestamp(s->main, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_tsq, 2 * (uint32_t)g_cur); }
     if (g_cq) vkCmdResetQueryPool(s->main, g_cq, (uint32_t)g_cur * CQ, CQ);
@@ -1530,7 +1558,7 @@ static VkMemoryBarrier2 full_barrier(void) {
                               VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT};
 }
 void vk_img_barrier_all(VkCommandBuffer cb) {
-    VkMemoryBarrier b = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT};
+    VkMemoryBarrier b = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT};
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &b, 0, NULL, 0, NULL);
 }
 void vk_gpu_wrote(uint64_t a, uint64_t n);
@@ -1900,6 +1928,16 @@ uint64_t mtl_sub_commit(void) {
     struct timespec t0, t1; clock_gettime(CLOCK_MONOTONIC, &t0); pthread_mutex_lock(&g_vk_queue_mu); VkResult r = vkQueueSubmit(V.q, 1, &si, fe); pthread_mutex_unlock(&g_vk_queue_mu); clock_gettime(CLOCK_MONOTONIC, &t1); g_ns_submit += (uint64_t)((t1.tv_sec - t0.tv_sec) * 1000000000ll + (t1.tv_nsec - t0.tv_nsec));
     if (r) { void vk_crumbs_report(void); vk_crumbs_report(); die("[vk] vkQueueSubmit: %d (device lost?)", r); }
     s->fence = f;
+    if (g_shadow_pools) {
+        int need_cb = s->ngw > 0;
+        if (!need_cb && !s->readback_ranges) {
+            pthread_rwlock_rdlock(&g_pool_mu);
+            for (int i = 0; i < g_npool && !need_cb; i++)
+                if (g_pool[i].shadow && g_pool[i].synced && !(g_pool[i].flags & 0x2)) need_cb = 1;
+            pthread_rwlock_unlock(&g_pool_mu);
+        }
+        if (need_cb) g_copyback_fence = f;
+    }
     cpend *c = calloc(1, sizeof *c); c->fence = f; c->frame = __atomic_load_n(&g_cur_frame, __ATOMIC_RELAXED); c->n = s->npost; c->rslot = g_cur; c->slot = s->no_ts ? -1 : g_cur; s->no_ts = 0;
     c->npass = g_npass[g_cur]; memcpy(c->pmeta, g_pmeta[g_cur], sizeof(pass_meta) * (size_t)c->npass);
     if (s->npost) { c->ops = malloc(s->npost * sizeof *c->ops); memcpy(c->ops, s->post, s->npost * sizeof *c->ops); }

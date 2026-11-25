@@ -117,3 +117,41 @@ void dm_overlay_theme_done(const ov_theme *t) {
     for (int i = 0; i < 2; i++) if (t == &g_th[i]) { free(g_th[i].px); g_th[i].px = NULL; }
     pthread_mutex_unlock(&g_mu);
 }
+
+#define BEZEL_MAX 16
+static struct { int loaded, n; char names[BEZEL_MAX][32], files[BEZEL_MAX][64]; } g_bz_list;
+static void bezel_init(void) {
+    if (g_bz_list.loaded) return;
+    g_bz_list.loaded = 1;
+    size_t n = 0; char *tsv = (char *)asset("bezels/bezels.tsv", &n);
+    if (!tsv) return;
+    for (char *line = strtok(tsv, "\n"); line && g_bz_list.n < BEZEL_MAX; line = strtok(NULL, "\n")) {
+        if (line[0] == '#' || !line[0]) continue;
+        char nm[32], fn[64];
+        if (sscanf(line, "%31[^\t\r]\t%63s", nm, fn) == 2) {
+            int k = g_bz_list.n++;
+            snprintf(g_bz_list.names[k], sizeof g_bz_list.names[k], "%s", nm);
+            snprintf(g_bz_list.files[k], sizeof g_bz_list.files[k], "%s", fn);
+        }
+    }
+    free(tsv);
+}
+int dm_bezel_count(void) { pthread_mutex_lock(&g_mu); bezel_init(); int n = g_bz_list.n; pthread_mutex_unlock(&g_mu); return n; }
+const char *dm_bezel_name(int idx) {
+    if (idx <= 0) return TR("Off", "关");
+    pthread_mutex_lock(&g_mu); bezel_init();
+    const char *r = idx <= g_bz_list.n ? g_bz_list.names[idx - 1] : "";
+    pthread_mutex_unlock(&g_mu); return r;
+}
+uint8_t *dm_bezel_load(int idx, int *w, int *h) {
+    if (idx <= 0) return NULL;
+    char fn[80] = "";
+    pthread_mutex_lock(&g_mu); bezel_init();
+    if (idx <= g_bz_list.n) snprintf(fn, sizeof fn, "bezels/%s", g_bz_list.files[idx - 1]);
+    pthread_mutex_unlock(&g_mu);
+    if (!fn[0]) return NULL;
+    size_t pn = 0; uint8_t *pf = asset(fn, &pn);
+    uint8_t *px = pf ? png_rgba(pf, pn, w, h) : NULL;
+    free(pf);
+    return px;
+}
