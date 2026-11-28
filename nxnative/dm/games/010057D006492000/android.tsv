@@ -2,8 +2,9 @@
 # Unreal Engine 4.18 on SDK 3.5.1, update 1.0.5; 5,434 shaders, all translated. What it needed: the legacy paks' zlib blocks read without the game (uepak.py), a jump table bounded by
 # a 64-bit compare (patch_nso.py), the sparse tile layout queries and a virtual pool per streamed texture read through its page table (hle_nvn.c, gfx_vk_tex.c), and the automatic
 # block height for sparse textures smaller than a tile (nvn_tex.c: the menus' button frames and the travelers' signatures were scrambled).
-# Tested 2026-11-03 on the Red Magic Astra (NP05J, Snapdragon 8 Elite, Adreno 830, Android 16): the boot, the title, a new game, the traveler selection and its confirmation at 30 fps,
+# Tested 2026-11-03 on the Red Magic Astra (NP05J, Snapdragon 8 Elite, Adreno 830, Android 16) [upstream nx2android repo]: the boot, the title, a new game, the traveler selection and its confirmation at 30 fps,
 # no red log line. Not yet seen: a story opening, a battle.
+# Local fork testing: tested only on Poco X6 Pro 5G (Mali-G615 MC6, Vulkan 1.3.247, v1.r44p1); no Snapdragon device tested locally.
 status	boots
 tested	v327680 Red Magic Astra NP05J (Snapdragon 8 Elite, Adreno 830, Android 16)
 package	org.nx2a.t010057d006492000
