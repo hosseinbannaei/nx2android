@@ -15,6 +15,7 @@ env	DM_VK_MT_REPLAY=1
 env	DM_NVN_ASYNC=1
 env	DM_PIN_REPLAY=prime
 env	DM_VK_POOL_READBACK_RANGES=1
+env	DM_VK_POOL_ASYNC=1
 
 # Mobile-friendly HD-2D JRPG layout: hide unused camera stick and stick clicks (stick_r, ls, rs),
 # keep left stick + compact D-pad on left, A/B/X/Y diamond + Boost (L/R) & triggers on right, and +/- in upper corners.
