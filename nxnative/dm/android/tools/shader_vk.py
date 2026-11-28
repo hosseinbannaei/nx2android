@@ -386,6 +386,27 @@ def int_inputs(spv):
             else: other.add(loads[x])
     return {str(loc[v]): 'sint' if v in sint else 'uint' for v in uses if v not in other and v in loc}
 
+def _octopath_stencil_bypass(spv: bytes) -> bytes:
+    """Bypass UE4 SceneStencilTexture gate when BasePass stencil is cleared before lighting."""
+    w = list(struct.unpack(f'<{len(spv) // 4}I', spv))
+    ins, i = [], 5
+    while i < len(w):
+        n = w[i] >> 16
+        if not n or i + n > len(w): return spv
+        ins.append((w[i] & 0xffff, i, n))
+        i += n
+    pat = [95, 81, 124, 65, 61, 124, 199, 171, 167]
+    changed = False
+    for k in range(len(ins) - len(pat) + 1):
+        if [ins[k + j][0] for j in range(len(pat))] != pat: continue
+        _, ne_off, ne_n = ins[k + 7]
+        _, and_off, and_n = ins[k + 8]
+        if ne_n >= 4 and and_n == 5 and w[and_off + 4] == w[ne_off + 2]:
+            w[and_off + 4] = w[and_off + 3]
+            changed = True
+    return struct.pack(f'<{len(w)}I', *w) if changed else spv
+
+
 def main():
     handle_remaps = {}
     table = GAME.table('android_shader_handles.tsv')
@@ -490,6 +511,8 @@ def main():
             if product is None: raise ValueError(batch_errors[k] or 'no output')
             spv, res = product
             spv = spv_precise.lower(spv_half.lower(spv_texture_offsets.lower(spv)))
+            if os.environ.get('DM_GAME') == '010057D006492000' and stages[k] == 'ps':
+                spv = _octopath_stencil_bypass(spv)
             binds, local, io = spirv_bindings(spv)
             shader_products.validate_bindings(binds, res)
             if k in handle_remaps:
